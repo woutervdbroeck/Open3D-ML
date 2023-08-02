@@ -113,6 +113,11 @@ class RandLANet(BaseModel):
             SharedMLP(32, cfg.num_classes, bn=False))
 
     def preprocess(self, data, attr):
+        '''
+        1. gridsubsample
+        2. build KDTree for fast querying nearest neighbour
+        3. if inference: get nearest neighbour in subsampled points for each original point
+        '''
         cfg = self.cfg
 
         points = np.array(data['point'][:, 0:3], dtype=np.float32)
@@ -172,18 +177,21 @@ class RandLANet(BaseModel):
         feat = data['feat'].copy() if data['feat'] is not None else None
         tree = data['search_tree']
 
+        # Select num_points from whole cloud (randomly pick center and take num_point nearest neighbours) 
         pc, selected_idxs, center_point = self.trans_point_sampler(
             pc=pc,
             feat=feat,
             label=label,
             search_tree=tree,
-            num_points=self.cfg.num_points)
+            num_points=self.cfg.num_points
+        )
 
         label = label[selected_idxs]
 
         if feat is not None:
             feat = feat[selected_idxs]
-
+        
+        # Apply augmentations
         augment_cfg = self.cfg.get('augment', {}).copy()
         val_augment_cfg = {}
         if 'recenter' in augment_cfg:
@@ -191,14 +199,11 @@ class RandLANet(BaseModel):
         if 'normalize' in augment_cfg:
             val_augment_cfg['normalize'] = augment_cfg.pop('normalize')
 
-        self.augmenter.augment(pc, feat, label, val_augment_cfg, seed=rng)
+        pc, feat, label = self.augmenter.augment(pc, feat, label, val_augment_cfg, seed=rng)
 
+        # Augmentations specifically for training only
         if attr['split'] in ['training', 'train']:
-            pc, feat, label = self.augmenter.augment(pc,
-                                                     feat,
-                                                     label,
-                                                     augment_cfg,
-                                                     seed=rng)
+            pc, feat, label = self.augmenter.augment(pc, feat, label, augment_cfg, seed=rng)
 
         if feat is None:
             feat = pc.copy()
@@ -385,18 +390,18 @@ class RandLANet(BaseModel):
         self.inference_ori_data = data
         self.inference_data = self.preprocess(data, attr)
         self.inference_proj_inds = self.inference_data['proj_inds']
-        num_points = self.inference_data['search_tree'].data.shape[0]
-        self.possibility = self.rng.random(num_points) * 1e-3
+        num_points = self.inference_data['search_tree'].data.shape[0] # number of points after subsampling
+        self.possibility = self.rng.random(num_points) * 1e-3 # num_points random numbers between 0 and 0.001
         self.test_probs = np.zeros(shape=[num_points, self.cfg.num_classes],
                                    dtype=np.float16)
-        self.pbar = tqdm(total=self.possibility.shape[0])
+        self.pbar = tqdm(total=self.possibility.shape[0]) # total = num_points
         self.pbar_update = 0
         self.batcher = DefaultBatcher()
 
     def inference_preprocess(self):
         min_possibility_idx = np.argmin(self.possibility)
         attr = {'split': 'test'}
-        data = self.transform(self.inference_data, attr, min_possibility_idx)
+        data = self.transform(self.inference_data, attr, min_possibility_idx) # min_possibility_idx is unused
         inputs = {'data': data, 'attr': attr}
         inputs = self.batcher.collate_fn([inputs])
         self.inference_input = inputs
@@ -414,12 +419,12 @@ class RandLANet(BaseModel):
         pred_l = np.argmax(probs, 1)
 
         inds = inputs['data']['point_inds']
-        self.test_probs[inds] = self.test_smooth * self.test_probs[inds] + (
+        self.test_probs[inds] = self.test_smooth * self.test_probs[inds] + (  # = 0.05 * prob --> no clue why
             1 - self.test_smooth) * probs
 
         self.pbar.update(self.possibility[self.possibility > 0.5].shape[0] -
                          self.pbar_update)
-        self.pbar_update = self.possibility[self.possibility > 0.5].shape[0]
+        self.pbar_update = self.possibility[self.possibility > 0.5].shape[0] # = 0
         if np.min(self.possibility) > 0.5:
             self.pbar.close()
             pred_labels = np.argmax(self.test_probs, 1)
@@ -459,8 +464,9 @@ class RandLANet(BaseModel):
             probs = probs.cpu().data.numpy()
             inds = inputs['data']['point_inds'][b]
 
-            test_probs[inds] = self.test_smooth * test_probs[inds] + (
-                1 - self.test_smooth) * probs
+            # test_probs[inds] = self.test_smooth * test_probs[inds] + (
+            #     1 - self.test_smooth) * probs
+            test_probs[inds] = probs
 
         return test_probs
 
