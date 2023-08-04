@@ -168,8 +168,7 @@ class PointTransformer(BaseModel):
         feats = [batch.feat]  # (n, c)
         row_splits = [batch.row_splits]  # (b)
 
-        feats[0] = points[0] if self.in_channels == 3 else torch.cat(
-            (points[0], feats[0]), 1)
+        # feats[0] = points[0] if self.in_channels == 3 else torch.cat((points[0], feats[0]), 1)
 
         for i in range(5):
             p, f, r = self.encoders[i]([points[i], feats[i], row_splits[i]])
@@ -225,8 +224,8 @@ class PointTransformer(BaseModel):
         data = dict()
 
         if (cfg.voxel_size):
-            points_min = np.min(points, 0)
-            points -= points_min
+            # points_min = np.min(points, 0)
+            # points -= points_min
 
             if (feat is None):
                 sub_points, sub_labels = DataProcessing.grid_subsampling(
@@ -276,30 +275,34 @@ class PointTransformer(BaseModel):
         feat = data['feat']
         labels = data['label']
 
+        # TODO: apply augmentations after selection + apply on validation set
         if attr['split'] in ['training', 'train']:
-            points, feat, labels = self.augmenter.augment(
-                points, feat, labels, self.cfg.get('augment', None))
+            points, feat, labels = self.augmenter.augment(points, feat, labels, self.cfg.get('augment', None))
 
+        # Select random point and max_voxels neirest neighbours
+        # For validation, always pick same subset
         if attr['split'] not in ['test', 'testing']:
             if cfg.max_voxels and data['label'].shape[0] > cfg.max_voxels:
-                init_idx = np.random.randint(
-                    labels.shape[0]
-                ) if 'train' in attr['split'] else labels.shape[0] // 2
-                crop_idx = np.argsort(
-                    np.sum(np.square(points - points[init_idx]),
-                           1))[:cfg.max_voxels]
+                init_idx = np.random.randint(labels.shape[0]) if 'train' in attr['split'] else labels.shape[0] // 2
+                crop_idx = np.argsort(np.sum(np.square(points - points[init_idx]), 1))[:cfg.max_voxels]
                 if feat is not None:
-                    points, feat, labels = points[crop_idx], feat[
-                        crop_idx], labels[crop_idx]
+                    points, feat, labels = points[crop_idx], feat[crop_idx], labels[crop_idx]
                 else:
                     points, labels = points[crop_idx], labels[crop_idx]
 
+        # Recenter
         points_min, points_max = np.min(points, 0), np.max(points, 0)
         points -= (points_min + points_max) / 2.0
 
+        if feat is None:
+            feat = points.copy()
+            # feat = None
+        else:
+            feat = feat / 255.0
+            feat = np.concatenate([points, feat], axis=1)
+
         data['point'] = torch.from_numpy(points).to(torch.float32)
-        if feat is not None:
-            data['feat'] = torch.from_numpy(feat).to(torch.float32) / 255.0
+        data['feat'] = torch.from_numpy(feat).to(torch.float32) if feat is not None else None
         data['label'] = torch.from_numpy(labels).to(torch.int64)
 
         return data
@@ -358,16 +361,23 @@ class PointTransformer(BaseModel):
 
         return loss, labels, scores
 
-    def get_optimizer(self, cfg_pipeline):
-        optimizer = torch.optim.SGD(self.parameters(), **cfg_pipeline.optimizer)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=[
-                int(cfg_pipeline.max_epoch * 0.6),
-                int(cfg_pipeline.max_epoch * 0.8)
-            ],
-            gamma=0.1)
+    # def get_optimizer(self, cfg_pipeline):
+    #     optimizer = torch.optim.SGD(self.parameters(), **cfg_pipeline.optimizer)
+    #     scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    #         optimizer,
+    #         milestones=[
+    #             int(cfg_pipeline.max_epoch * 0.6),
+    #             int(cfg_pipeline.max_epoch * 0.8)
+    #         ],
+    #         gamma=0.1,
+    #     )
 
+    #     return optimizer, scheduler
+    
+    def get_optimizer(self, cfg_pipeline):
+        # Optimizer used in Randlanet
+        optimizer = torch.optim.Adam(self.parameters(), **cfg_pipeline.optimizer)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, cfg_pipeline.scheduler_gamma)
         return optimizer, scheduler
 
 
