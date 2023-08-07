@@ -158,6 +158,8 @@ class SemanticSegmentation(BasePipeline):
 
         with torch.no_grad():
             for unused_step, inputs in enumerate(infer_loader):
+                if hasattr(inputs['data'], 'to'):
+                    inputs['data'].to(device)
                 results = model(inputs['data'])
                 self.update_tests(infer_sampler, inputs, results)
 
@@ -170,8 +172,11 @@ class SemanticSegmentation(BasePipeline):
 
         valid_scores, valid_labels = filter_valid_label(
             torch.tensor(inference_result['predict_scores']),
-            torch.tensor(data['label']), model.cfg.num_classes,
-            model.cfg.ignored_label_inds, device)
+            torch.tensor(data['label']), 
+            model.cfg.num_classes,
+            model.cfg.ignored_label_inds, 
+            device,
+        )
 
         metric.update(valid_scores, valid_labels)
         log.info(f"Accuracy : {metric.acc()}")
@@ -237,15 +242,16 @@ class SemanticSegmentation(BasePipeline):
                         'predict_scores': self.ori_test_probs.pop()
                     }
                     attr = self.dataset_split.get_attr(test_sampler.cloud_id)
-                    gt_labels = self.dataset_split.get_data(
-                        test_sampler.cloud_id)['label']
+                    gt_labels = self.dataset_split.get_data(test_sampler.cloud_id)['label']
+                    
                     if (gt_labels > 0).any():
                         valid_scores, valid_labels = filter_valid_label(
-                            torch.tensor(
-                                inference_result['predict_scores']).to(device),
+                            torch.tensor(inference_result['predict_scores']).to(device),
                             torch.tensor(gt_labels).to(device),
-                            model.cfg.num_classes, model.cfg.ignored_label_inds,
-                            device)
+                            model.cfg.num_classes, 
+                            model.cfg.ignored_label_inds,
+                            device,
+                        )
 
                         self.metric_test.update(valid_scores, valid_labels)
                         log.info(f"Accuracy : {self.metric_test.acc()}")
@@ -263,54 +269,50 @@ class SemanticSegmentation(BasePipeline):
 
     def update_tests(self, sampler, inputs, results):
         """Update tests using sampler, inputs, and results."""
-        split = sampler.split
+        split = sampler.split # split = 'test'
         end_threshold = 0.5
         if self.curr_cloud_id != sampler.cloud_id:
             self.curr_cloud_id = sampler.cloud_id
             num_points = sampler.possibilities[sampler.cloud_id].shape[0]
-            self.pbar = tqdm(total=num_points,
-                             desc="{} {}/{}".format(split, self.curr_cloud_id,
-                                                    len(sampler.dataset)))
+            self.pbar = tqdm(
+                total=num_points,
+                desc="{} {}/{}".format(split, self.curr_cloud_id, len(sampler.dataset))
+            )
             self.pbar_update = 0
-            self.test_probs.append(
-                np.zeros(shape=[num_points, self.model.cfg.num_classes],
-                         dtype=np.float16))
+            self.test_probs.append(np.zeros(shape=[num_points, self.model.cfg.num_classes], dtype=np.float16))
             self.complete_infer = False
 
         this_possiblility = sampler.possibilities[sampler.cloud_id]
-        self.pbar.update(
-            this_possiblility[this_possiblility > end_threshold].shape[0] -
-            self.pbar_update)
-        self.pbar_update = this_possiblility[
-            this_possiblility > end_threshold].shape[0]
+        self.pbar.update(this_possiblility[this_possiblility > end_threshold].shape[0] - self.pbar_update)
+        self.pbar_update = this_possiblility[this_possiblility > end_threshold].shape[0]
+
         self.test_probs[self.curr_cloud_id] = self.model.update_probs(
             inputs,
             results,
             self.test_probs[self.curr_cloud_id],
         )
 
+        # When all predictions are made
         if (split in ['test'] and
                 this_possiblility[this_possiblility > end_threshold].shape[0]
                 == this_possiblility.shape[0]):
 
             proj_inds = self.model.preprocess(
-                self.dataset_split.get_data(self.curr_cloud_id), {
-                    'split': split
-                }).get('proj_inds', None)
+                self.dataset_split.get_data(self.curr_cloud_id),
+                {'split': split},
+            ).get('proj_inds', None)
+            
             if proj_inds is None:
-                proj_inds = np.arange(
-                    self.test_probs[self.curr_cloud_id].shape[0])
-            test_labels = np.argmax(
-                self.test_probs[self.curr_cloud_id][proj_inds], 1)
+                proj_inds = np.arange(self.test_probs[self.curr_cloud_id].shape[0])
 
-            self.ori_test_probs.append(
-                self.test_probs[self.curr_cloud_id][proj_inds])
+            test_labels = np.argmax(self.test_probs[self.curr_cloud_id][proj_inds], 1)
+
+            self.ori_test_probs.append(self.test_probs[self.curr_cloud_id][proj_inds])
             self.ori_test_labels.append(test_labels)
             self.complete_infer = True
 
     def run_train(self):
-        torch.manual_seed(self.rng.integers(np.iinfo(
-            np.int32).max))  # Random reproducible seed for torch
+        torch.manual_seed(self.rng.integers(np.iinfo(np.int32).max))  # Random reproducible seed for torch
         model = self.model
         device = self.device
         model.device = device
@@ -329,6 +331,7 @@ class SemanticSegmentation(BasePipeline):
         Loss = SemSegLoss(self, model, dataset, device)
         self.metric_train = SemSegMetric()
         self.metric_val = SemSegMetric()
+        iou_val = 0
 
         self.batcher = self.get_batcher(device)
 
@@ -379,12 +382,9 @@ class SemanticSegmentation(BasePipeline):
         self.load_ckpt(model.cfg.ckpt_path, is_resume=is_resume)
 
         dataset_name = dataset.name if dataset is not None else ''
-        tensorboard_dir = join(
-            self.cfg.train_sum_dir,
-            model.__class__.__name__ + '_' + dataset_name + '_torch')
+        tensorboard_dir = join(self.cfg.train_sum_dir, model.__class__.__name__ + '_' + dataset_name + '_torch')
         runid = get_runid(tensorboard_dir)
-        self.tensorboard_dir = join(self.cfg.train_sum_dir,
-                                    runid + '_' + Path(tensorboard_dir).name)
+        self.tensorboard_dir = join(self.cfg.train_sum_dir, runid + '_' + Path(tensorboard_dir).name)
 
         writer = SummaryWriter(self.tensorboard_dir)
         self.save_config(writer)
@@ -426,6 +426,19 @@ class SemanticSegmentation(BasePipeline):
                 if 'train' in record_summary and step == 0:
                     self.summary['train'] = self.get_3d_summary(
                         results, inputs['data'], epoch)
+                    
+                
+                # xyz = inputs['data']['coords'][0][0].numpy()
+                # labels_gt = inputs['data']['labels'].reshape(-1, 1).numpy()
+                # labels_pred = np.argmax(predict_scores.detach().cpu().numpy(), 1).reshape(-1, 1)
+                # gt = np.hstack((xyz, labels_gt))
+                # prediction = np.hstack((xyz, labels_pred))
+                # path = "./tests/train_sample" + '_' + str(step)
+                # np.savetxt(path + '_' + 'gt.txt', gt, fmt='%.3f')
+                # np.savetxt(path + '_' + 'pred.txt', prediction, fmt='%.3f')
+
+                # import pdb
+                # breakpoint()
 
             self.scheduler.step()
 
@@ -446,7 +459,7 @@ class SemanticSegmentation(BasePipeline):
 
                     if predict_scores.size()[-1] == 0:
                         continue
-
+                        
                     self.metric_val.update(predict_scores, gt_labels)
 
                     self.valid_losses.append(loss.cpu().item())
@@ -454,11 +467,31 @@ class SemanticSegmentation(BasePipeline):
                     if 'valid' in record_summary and step == 0:
                         self.summary['valid'] = self.get_3d_summary(
                             results, inputs['data'], epoch)
+                    
+
+                    # xyz = inputs['data']['coords'][0][0].numpy()
+                    # labels_gt = inputs['data']['labels'][0].reshape(-1, 1).numpy()
+                    # labels_pred = np.argmax(results[0].detach().cpu().numpy(), 1).reshape(-1, 1)
+                    # gt = np.hstack((xyz, labels_gt))
+                    # prediction = np.hstack((xyz, labels_pred))
+                    # path = "./tests/val_sample" + '_' + str(step)
+                    # np.savetxt(path + '_' + 'gt.txt', gt, fmt='%.3f')
+                    # np.savetxt(path + '_' + 'pred.txt', prediction, fmt='%.3f')
+
+                    # import pdb
+                    # breakpoint()
 
             self.save_logs(writer, epoch)
 
-            if epoch % cfg.save_ckpt_freq == 0 or epoch == cfg.max_epoch:
-                self.save_ckpt(epoch)
+            if cfg.get('save_ckpt_freq', None) is not None:
+                if epoch % cfg.save_ckpt_freq == 0 or epoch == cfg.max_epoch:
+                    self.save_ckpt(epoch)
+
+            if cfg.get('save_ckpt_best', None) == True:
+                if self.metric_val.iou()[-1] > iou_val:
+                    iou_val = self.metric_val.iou()[-1]
+                    self.save_ckpt(epoch)
+
 
     def get_batcher(self, device, split='training'):
         """Get the batcher to be used based on the device and split."""
@@ -683,31 +716,39 @@ class SemanticSegmentation(BasePipeline):
             log.info(f'Loading checkpoint scheduler_state_dict')
             self.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
 
-    def save_ckpt(self, epoch):
+    def save_ckpt(self, epoch, best=False):
         """Save a checkpoint at the passed epoch."""
         path_ckpt = join(self.cfg.logs_dir, 'checkpoint')
         make_dir(path_ckpt)
+        ckpt_name = 'ckpt_best.pth' if best else f'ckpt_{epoch:05d}.pth'
         torch.save(
             dict(epoch=epoch,
                  model_state_dict=self.model.state_dict(),
                  optimizer_state_dict=self.optimizer.state_dict(),
                  scheduler_state_dict=self.scheduler.state_dict()),
-            join(path_ckpt, f'ckpt_{epoch:05d}.pth'))
+            join(path_ckpt, ckpt_name))
         log.info(f'Epoch {epoch:3d}: save ckpt to {path_ckpt:s}')
 
     def save_config(self, writer):
         """Save experiment configuration with tensorboard summary."""
-        if hasattr(self, 'cfg_tb'):
-            writer.add_text("Description/Open3D-ML", self.cfg_tb['readme'], 0)
-            writer.add_text("Description/Command line", self.cfg_tb['cmd_line'],
-                            0)
-            writer.add_text('Configuration/Dataset',
-                            code2md(self.cfg_tb['dataset'], language='json'), 0)
-            writer.add_text('Configuration/Model',
-                            code2md(self.cfg_tb['model'], language='json'), 0)
-            writer.add_text('Configuration/Pipeline',
-                            code2md(self.cfg_tb['pipeline'], language='json'),
-                            0)
+        # if hasattr(self, 'cfg_tb'):
+        #     writer.add_text("Description/Open3D-ML", self.cfg_tb['readme'], 0)
+        #     writer.add_text("Description/Command line", self.cfg_tb['cmd_line'],
+        #                     0)
+        #     writer.add_text('Configuration/Dataset',
+        #                     code2md(self.cfg_tb['dataset'], language='json'), 0)
+        #     writer.add_text('Configuration/Model',
+        #                     code2md(self.cfg_tb['model'], language='json'), 0)
+        #     writer.add_text('Configuration/Pipeline',
+        #                     code2md(self.cfg_tb['pipeline'], language='json'),
+        #                     0)
+        # import pdb
+        # breakpoint()
+        # print(self.model.cfg)
+        # print(self.cfg.cfg_dict)
+        writer.add_text('Config/data', str(self.dataset.cfg.cfg_dict), 0)
+        writer.add_text('Config/model', str(self.model.cfg.cfg_dict), 0)
+        writer.add_text('Config/pipeline', str(self.cfg.cfg_dict), 0)
 
 
 PIPELINE._register_module(SemanticSegmentation, "torch")
