@@ -383,8 +383,8 @@ class SemanticSegmentation(BasePipeline):
 
         dataset_name = dataset.name if dataset is not None else ''
         tensorboard_dir = join(self.cfg.train_sum_dir, model.__class__.__name__ + '_' + dataset_name + '_torch')
-        runid = get_runid(tensorboard_dir)
-        self.tensorboard_dir = join(self.cfg.train_sum_dir, runid + '_' + Path(tensorboard_dir).name)
+        # runid = get_runid(tensorboard_dir)
+        self.tensorboard_dir = join(self.cfg.train_sum_dir, timestamp + '_' + Path(tensorboard_dir).name)
 
         writer = SummaryWriter(self.tensorboard_dir)
         self.save_config(writer)
@@ -485,12 +485,12 @@ class SemanticSegmentation(BasePipeline):
 
             if cfg.get('save_ckpt_freq', None) is not None:
                 if epoch % cfg.save_ckpt_freq == 0 or epoch == cfg.max_epoch:
-                    self.save_ckpt(epoch)
+                    self.save_ckpt(epoch, timestamp=timestamp)
 
             if cfg.get('save_ckpt_best', None) == True:
                 if self.metric_val.iou()[-1] > iou_val:
                     iou_val = self.metric_val.iou()[-1]
-                    self.save_ckpt(epoch)
+                    self.save_ckpt(epoch, best=True, timestamp=timestamp)
 
 
     def get_batcher(self, device, split='training'):
@@ -716,9 +716,10 @@ class SemanticSegmentation(BasePipeline):
             log.info(f'Loading checkpoint scheduler_state_dict')
             self.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
 
-    def save_ckpt(self, epoch, best=False):
+    def save_ckpt(self, epoch, best=False, timestamp=None):
         """Save a checkpoint at the passed epoch."""
-        path_ckpt = join(self.cfg.logs_dir, 'checkpoint')
+        dir_name = 'checkpoint' + '_' + timestamp if timestamp is not None else 'checkpoint'
+        path_ckpt = join(self.cfg.logs_dir, dir_name)
         make_dir(path_ckpt)
         ckpt_name = 'ckpt_best.pth' if best else f'ckpt_{epoch:05d}.pth'
         torch.save(
