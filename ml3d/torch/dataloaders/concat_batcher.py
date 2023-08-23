@@ -458,6 +458,7 @@ class PointTransformerBatch:
         pc = []
         feat = []
         label = []
+        point_inds = []
         splits = [0]
 
         for batch in batches:
@@ -465,22 +466,26 @@ class PointTransformerBatch:
             pc.append(data['point'])
             feat.append(data['feat'])
             label.append(data['label'])
+            point_inds.append(data['point_inds'])
             splits.append(splits[-1] + data['point'].shape[0])
 
-        self.point = torch.cat(pc, 0)
-        self.feat = torch.cat(feat, 0)
+        self.point = torch.cat(pc, 0)  
+        self.feat = torch.cat(feat, 0)  if feat[0] is not None else None
         self.label = torch.cat(label, 0)
+        self.point_inds = torch.cat(point_inds, 0)
         self.row_splits = torch.LongTensor(splits)
 
     def pin_memory(self):
         self.point = self.point.pin_memory()
-        self.feat = self.feat.pin_memory()
+        if self.feat is not None:
+            self.feat = self.feat.pin_memory()
         self.label = self.label.pin_memory()
         return self
 
     def to(self, device):
         self.point = self.point.to(device)
-        self.feat = self.feat.to(device)
+        if self.feat is not None:
+            self.feat = self.feat.to(device)
         self.label = self.label.to(device)
 
 
