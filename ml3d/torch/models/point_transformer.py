@@ -152,7 +152,7 @@ class PointTransformer(BaseModel):
                       nsample=nsample))
         return nn.Sequential(*layers)
 
-    def forward(self, batch):
+    def forward(self, inputs):
         """Forward pass for the model.
 
         Args:
@@ -162,11 +162,11 @@ class PointTransformer(BaseModel):
                 row_splits (tf.int64): row splits for batches (b+1,)
 
         Returns:
-            Returns the probability distribution.
+            Returns the logits.
         """
-        points = [batch.point]  # (n, 3)
-        feats = [batch.feat]  # (n, c)
-        row_splits = [batch.row_splits]  # (b)
+        points = [inputs.point]  # (n, 3)
+        feats = [inputs.feat]  # (n, c)
+        row_splits = [inputs.row_splits]  # (b)
 
         # feats[0] = points[0] if self.in_channels == 3 else torch.cat((points[0], feats[0]), 1)
 
@@ -245,7 +245,7 @@ class PointTransformer(BaseModel):
         data['point'] = sub_points
         data['feat'] = sub_feat
         data['label'] = sub_labels
-        data['search_tree'] = search_tree
+        data['search_tree'] = search_tree 
 
         if attr['split'] in ["test", "testing"]:
             proj_inds = np.squeeze(
@@ -270,50 +270,146 @@ class PointTransformer(BaseModel):
             (point, feat, label).
 
         """
+        # If num_workers > 0, use new RNG with unique seed for each thread.
+        # Else, use default RNG.
+        if torch.utils.data.get_worker_info():
+            seedseq = np.random.SeedSequence(
+                torch.utils.data.get_worker_info().seed +
+                torch.utils.data.get_worker_info().id)
+            rng = np.random.default_rng(seedseq.spawn(1)[0])
+        else:
+            rng = self.rng
+
         cfg = self.cfg
-        points = data['point']
-        feat = data['feat']
-        labels = data['label']
+        pc = data['point'].copy()
+        label = data['label'].copy()
+        feat = data['feat'].copy() if data['feat'] is not None else None
+        tree = data['search_tree']
 
-        # TODO: apply augmentations after selection + apply on validation set
+        # Select num_points from whole cloud (randomly pick center and take num_point nearest neighbours) 
+        pc, selected_idxs, center_point = self.trans_point_sampler(
+            pc=pc,
+            feat=feat,
+            label=label,
+            search_tree=tree,
+            num_points=self.cfg.max_voxels
+        )
+
+        label = label[selected_idxs]
+        if feat is not None:
+            feat = feat[selected_idxs]
+        
+        # Apply augmentations
+        augment_cfg = self.cfg.get('augment', {}).copy()
+        val_augment_cfg = {}
+        if 'recenter' in augment_cfg:
+            val_augment_cfg['recenter'] = augment_cfg.pop('recenter')
+        if 'normalize' in augment_cfg:
+            val_augment_cfg['normalize'] = augment_cfg.pop('normalize')
+
+        pc, feat, label = self.augmenter.augment(pc, feat, label, val_augment_cfg, seed=rng)
+
+        # Augmentations specifically for training only
         if attr['split'] in ['training', 'train']:
-            points, feat, labels = self.augmenter.augment(points, feat, labels, self.cfg.get('augment', None))
-
-        # Select random point and max_voxels neirest neighbours
-        # For validation, always pick same subset
-        if attr['split'] not in ['test', 'testing']:
-            if cfg.max_voxels and data['label'].shape[0] > cfg.max_voxels:
-                init_idx = np.random.randint(labels.shape[0]) if 'train' in attr['split'] else labels.shape[0] // 2
-                crop_idx = np.argsort(np.sum(np.square(points - points[init_idx]), 1))[:cfg.max_voxels]
-                if feat is not None:
-                    points, feat, labels = points[crop_idx], feat[crop_idx], labels[crop_idx]
-                else:
-                    points, labels = points[crop_idx], labels[crop_idx]
-
-        # Recenter
-        points_min, points_max = np.min(points, 0), np.max(points, 0)
-        points -= (points_min + points_max) / 2.0
+            pc, feat, label = self.augmenter.augment(pc, feat, label, augment_cfg, seed=rng)
 
         if feat is None:
-            feat = points.copy()
-            # feat = None
+            feat = pc.copy()
         else:
-            feat = feat / 255.0
-            feat = np.concatenate([points, feat], axis=1)
+            feat = np.concatenate([pc, feat], axis=1)
 
-        data['point'] = torch.from_numpy(points).to(torch.float32)
-        data['feat'] = torch.from_numpy(feat).to(torch.float32) if feat is not None else None
-        data['label'] = torch.from_numpy(labels).to(torch.int64)
+        if cfg.in_channels != feat.shape[1]:
+            raise RuntimeError(
+                "Wrong feature dimension, please update in_channels(3 + feature_dimension) in config"
+            )
+        
+        # cfg = self.cfg
+        # points = data['point']
+        # feat = data['feat']
+        # labels = data['label']
 
-        return data
+        # # TODO: apply augmentations after selection + apply on validation set
+        # if attr['split'] in ['training', 'train']:
+        #     points, feat, labels = self.augmenter.augment(points, feat, labels, self.cfg.get('augment', None))
+
+        # # Select random point and max_voxels neirest neighbours
+        # # For validation, always pick same subset
+        # if attr['split'] not in ['test', 'testing']:
+        #     if cfg.max_voxels and data['label'].shape[0] > cfg.max_voxels:
+        #         init_idx = np.random.randint(labels.shape[0]) if 'train' in attr['split'] else labels.shape[0] // 2
+        #         crop_idx = np.argsort(np.sum(np.square(points - points[init_idx]), 1))[:cfg.max_voxels]
+        #         if feat is not None:
+        #             points, feat, labels = points[crop_idx], feat[crop_idx], labels[crop_idx]
+        #         else:
+        #             points, labels = points[crop_idx], labels[crop_idx]
+
+        # # Recenter
+        # points_min, points_max = np.min(points, 0), np.max(points, 0)
+        # points -= (points_min + points_max) / 2.0
+
+        # if feat is None:
+        #     feat = points.copy()
+        #     # feat = None
+        # else:
+        #     feat = feat / 255.0
+        #     feat = np.concatenate([points, feat], axis=1)
+
+        inputs = dict()
+        inputs['point'] = torch.from_numpy(pc).to(torch.float32)
+        inputs['feat'] = torch.from_numpy(feat).to(torch.float32) if feat is not None else None
+        inputs['label'] = torch.from_numpy(label).to(torch.int64)
+        inputs['point_inds'] = torch.from_numpy(selected_idxs).to(torch.int64)
+
+        # inputs = dict()
+        # inputs['point'] = points
+        # inputs['feat'] = feat
+        # inputs['label'] = labels.astype(np.int64)
+
+        return inputs
 
     def update_probs(self, inputs, results, test_probs):
         result = results.reshape(-1, self.cfg.num_classes)
         probs = torch.nn.functional.softmax(result, dim=-1).cpu().data.numpy()
 
-        self.trans_point_sampler(patchwise=False)
+        # self.trans_point_sampler(patchwise=False)
+        row_splits = inputs['data'].row_splits.numpy()
+        point_inds = inputs['data'].point_inds.numpy()
+        for i in range(len(row_splits) - 1):
+            inds = point_inds[row_splits[i]:row_splits[i+1]]
+            test_probs[inds] = probs[row_splits[i]:row_splits[i+1], :]
+        
 
-        return probs
+        # test_probs[inds] = probs
+        return test_probs
+
+        # return probs
+    
+    # def update_probs(self, inputs, results, test_probs):
+    #     """Update test probabilities with probs from current tested patch.
+
+    #     Args:
+    #         inputs: input to the model.
+    #         results: output of the model.
+    #         test_probs: probabilities for whole pointcloud
+
+    #     Returns:
+    #         updated probabilities
+
+    #     """
+    #     self.test_smooth = 0.95
+
+    #     for b in range(results.size()[0]):
+
+    #         result = torch.reshape(results[b], (-1, self.cfg.num_classes))
+    #         probs = torch.nn.functional.softmax(result, dim=-1)
+    #         probs = probs.cpu().data.numpy()
+    #         inds = inputs['data']['point_inds'][b]
+
+    #         # test_probs[inds] = self.test_smooth * test_probs[inds] + (
+    #         #     1 - self.test_smooth) * probs
+    #         test_probs[inds] = probs
+
+    #     return test_probs
 
     def inference_begin(self):
         data = self.preprocess(data, {'split': 'test'})
