@@ -16,6 +16,7 @@ from open3d.ml.torch.ops import ragged_to_dense
 from .base_model import BaseModel
 from ..modules.losses import filter_valid_label
 from ...utils import MODEL
+from ...datasets.augment import SemsegAugmentation
 
 from ...datasets.utils import (DataProcessing, trans_normalize, trans_augment,
                                trans_crop_pc, create_3D_rotations)
@@ -126,6 +127,7 @@ class KPFCNN(BaseModel):
                          **kwargs)
 
         cfg = self.cfg
+        self.augmenter = SemsegAugmentation(cfg.augment)
 
         # Current radius of convolution and feature dimension
         layer = 0
@@ -290,27 +292,34 @@ class KPFCNN(BaseModel):
 
         return x
 
+    # def get_optimizer(self, cfg_pipeline):
+    #     # Optimizer with specific learning rate for deformable KPConv
+    #     deform_params = [v for k, v in self.named_parameters() if 'offset' in k]
+    #     other_params = [
+    #         v for k, v in self.named_parameters() if 'offset' not in k
+    #     ]
+    #     deform_lr = cfg_pipeline.learning_rate * cfg_pipeline.deform_lr_factor
+    #     optimizer = torch.optim.SGD([{
+    #         'params': other_params
+    #     }, {
+    #         'params': deform_params,
+    #         'lr': deform_lr
+    #     }],
+    #                                 lr=cfg_pipeline.learning_rate,
+    #                                 momentum=cfg_pipeline.momentum,
+    #                                 weight_decay=cfg_pipeline.weight_decay)
+
+    #     scheduler = torch.optim.lr_scheduler.ExponentialLR(
+    #         optimizer, cfg_pipeline.scheduler_gamma)
+
+    #     return optimizer, scheduler
+    
     def get_optimizer(self, cfg_pipeline):
-        # Optimizer with specific learning rate for deformable KPConv
-        deform_params = [v for k, v in self.named_parameters() if 'offset' in k]
-        other_params = [
-            v for k, v in self.named_parameters() if 'offset' not in k
-        ]
-        deform_lr = cfg_pipeline.learning_rate * cfg_pipeline.deform_lr_factor
-        optimizer = torch.optim.SGD([{
-            'params': other_params
-        }, {
-            'params': deform_params,
-            'lr': deform_lr
-        }],
-                                    lr=cfg_pipeline.learning_rate,
-                                    momentum=cfg_pipeline.momentum,
-                                    weight_decay=cfg_pipeline.weight_decay)
-
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            optimizer, cfg_pipeline.scheduler_gamma)
-
+        # Optimizer used in Randlanet
+        optimizer = torch.optim.Adam(self.parameters(), **cfg_pipeline.optimizer)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, cfg_pipeline.scheduler_gamma)
         return optimizer, scheduler
+    
 
     def get_loss(self, Loss, results, inputs, device):
         """Runs the loss on outputs of the model.
@@ -395,7 +404,81 @@ class KPFCNN(BaseModel):
 
         return data
 
-    def transform(self, data, attr, is_test=False):
+    def transform(self, data, attr):
+
+        # If num_workers > 0, use new RNG with unique seed for each thread. Else, use default RNG.
+        if torch.utils.data.get_worker_info():
+            seedseq = np.random.SeedSequence(torch.utils.data.get_worker_info().seed + torch.utils.data.get_worker_info().id)
+            rng = np.random.default_rng(seedseq.spawn(1)[0])
+        else:
+            rng = self.rng
+
+        result_data = {
+            'p_list': [],
+            'f_list': [],
+            'l_list': [],
+            'p0_list': [],
+            's_list': [],
+            'R_list': [],
+            'r_inds_list': [],
+            'r_mask_list': [],
+            'val_labels_list': [],
+            'cfg': self.cfg
+        }
+
+        pc = data['point'].copy()
+        label = data['label'].copy()
+        feat = data['feat'].copy() if data['feat'] is not None else None
+        tree = data['search_tree']
+
+        # Select num_points from whole cloud (randomly pick center and take num_point nearest neighbours) 
+        pc, selected_idxs, center_point = self.trans_point_sampler(
+            pc=pc,
+            feat=feat,
+            label=label,
+            search_tree=tree,
+            num_points=self.cfg.min_in_points
+        )
+
+        label = label[selected_idxs]
+        if feat is not None:
+            feat = feat[selected_idxs]
+        
+        # Apply augmentations
+        augment_cfg = self.cfg.get('augment', {}).copy()
+        val_augment_cfg = {}
+        if 'recenter' in augment_cfg:
+            val_augment_cfg['recenter'] = augment_cfg.pop('recenter')
+        if 'normalize' in augment_cfg:
+            val_augment_cfg['normalize'] = augment_cfg.pop('normalize')
+
+        pc, feat, label = self.augmenter.augment(pc, feat, label, val_augment_cfg, seed=rng)
+
+        # Augmentations specifically for training only
+        if attr['split'] in ['training', 'train']:
+            pc, feat, label = self.augmenter.augment(pc, feat, label, augment_cfg, seed=rng)
+
+        if feat is None:
+            feat = pc.copy()
+        else:
+            feat = np.concatenate([pc, feat], axis=1)
+
+        result_data['p_list'] += [pc]
+        result_data['f_list'] += [feat]
+        result_data['l_list'] += [np.squeeze(label)]
+        result_data['p0_list'] += [center_point]
+        result_data['s_list'] += [np.zeros((1))]
+        result_data['R_list'] += [np.zeros((3, 3))]
+        result_data['r_inds_list'] += [np.zeros((0,))]
+        result_data['r_mask_list'] += [selected_idxs]
+        result_data['val_labels_list'] += [data['label']]
+
+        return result_data
+
+    # def transform(self, data, attr, is_test=False):
+
+        # TODO: replace this transform function by the one from pointtransformer + change inference + change optimizer
+
         # Read points
         points = data['point']
         sem_labels = data['label']
@@ -461,6 +544,7 @@ class KPFCNN(BaseModel):
             #     o_pts = new_points
             #     o_labels = sem_labels.astype(np.int32)
 
+            # Recenter / normalize
             curr_new_points = curr_new_points - p0
             t_normalize = self.cfg.get('t_normalize', {})
             curr_new_points, curr_feat = trans_normalize(
