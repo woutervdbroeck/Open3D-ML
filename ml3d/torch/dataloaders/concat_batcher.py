@@ -65,7 +65,7 @@ class KPConvBatch:
         ###################
 
         stacked_points = np.concatenate(p_list, axis=0)
-        features = np.concatenate(f_list, axis=0)
+        stacked_features = np.concatenate(f_list, axis=0)
         labels = np.concatenate(l_list, axis=0)
         frame_inds = np.array(fi_list, dtype=np.int32)
         frame_centers = np.stack(p0_list, axis=0)
@@ -74,36 +74,37 @@ class KPConvBatch:
         rots = np.stack(R_list, axis=0)
 
         # Input features (Use reflectance, input height or all coordinates)
-        stacked_features = np.ones_like(stacked_points[:, :1], dtype=np.float32)
-        if self.cfg.in_features_dim == 1:
-            pass
-        elif self.cfg.in_features_dim == 2:
-            # Use original height coordinate
-            stacked_features = np.hstack((stacked_features, features[:, 2:3]))
-        elif self.cfg.in_features_dim == 3:
-            # Use height + reflectance
-            assert features.shape[1] > 3, "feat from dataset can not be None \
-                        or try to set in_features_dim = 1, 2, 4"
+        # stacked_features = np.ones_like(stacked_points[:, :1], dtype=np.float32)
+        # if self.cfg.in_features_dim == 1:
+        #     pass
+        # elif self.cfg.in_features_dim == 2:
+        #     # Use original height coordinate
+        #     stacked_features = np.hstack((stacked_features, features[:, 2:3]))
+        # elif self.cfg.in_features_dim == 3:
+        #     # Use height + reflectance
+        #     # assert features.shape[1] > 3, "feat from dataset can not be None \
+        #                 # or try to set in_features_dim = 1, 2, 4"
 
-            stacked_features = np.hstack((stacked_features, features[:, 2:4]))
-        elif self.cfg.in_features_dim == 4:
-            # Use all coordinates
-            stacked_features = np.hstack((stacked_features, features[:, :3]))
-        elif self.cfg.in_features_dim == 5:
-            assert features.shape[1] >= 6, "feat from dataset should have \
-                    at least 3 dims, or try to set in_features_dim = 1, 2, 4"
+        #     # stacked_features = np.hstack((stacked_features, features[:, 2:4]))
+        #     stacked_features = features
+        # elif self.cfg.in_features_dim == 4:
+        #     # Use all coordinates
+        #     stacked_features = np.hstack((stacked_features, features[:, :3]))
+        # elif self.cfg.in_features_dim == 5:
+        #     assert features.shape[1] >= 6, "feat from dataset should have \
+        #             at least 3 dims, or try to set in_features_dim = 1, 2, 4"
 
-            # Use color + height
-            stacked_features = np.hstack((stacked_features, features[:, 2:6]))
-        elif self.cfg.in_features_dim >= 6:
+        #     # Use color + height
+        #     stacked_features = np.hstack((stacked_features, features[:, 2:6]))
+        # elif self.cfg.in_features_dim >= 6:
 
-            assert features.shape[1] > 3, "feat from dataset can not be None \
-                        or try to set in_features_dim = 1, 2, 4"
+        #     assert features.shape[1] > 3, "feat from dataset can not be None \
+        #                 or try to set in_features_dim = 1, 2, 4"
 
-            # Use all coordinates + reflectance
-            stacked_features = np.hstack((stacked_features, features))
-        else:
-            raise ValueError('in_features_dim should be >= 0')
+        #     # Use all coordinates + reflectance
+        #     stacked_features = np.hstack((stacked_features, features))
+        # else:
+        #     raise ValueError('in_features_dim should be >= 0')
 
         #######################
         # Create network inputs
