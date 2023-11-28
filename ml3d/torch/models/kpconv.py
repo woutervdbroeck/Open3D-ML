@@ -640,35 +640,51 @@ class KPFCNN(BaseModel):
         self.inference_input = inputs
 
         return inputs
-
+    
     def update_probs(self, inputs, results, test_probs):
-        self.test_smooth = 0.95
-        stk_probs = torch.nn.functional.softmax(results, dim=-1)
-        stk_probs = stk_probs.cpu().data.numpy()
+        # Convert logits to probabilities
+        probs = torch.nn.functional.softmax(results, dim=-1).cpu().data.numpy()
 
-        batch = inputs['data']
-        stk_labels = batch.labels.cpu().data.numpy()
+        # Get number of points in batches and sub indices
+        lengths = inputs['data'].lengths[0].cpu().numpy()
+        ind = inputs['data'].reproj_masks
 
-        # Get probs and labels
-        lengths = batch.lengths[0].cpu().numpy()
-
-        f_inds = batch.frame_inds.cpu().numpy()
-        r_inds_list = batch.reproj_inds
-        r_mask_list = batch.reproj_masks
-        labels_list = batch.val_labels
-
+        # Loop over batch and insert prediction into whole point cloud
         i0 = 0
         for b_i, length in enumerate(lengths):
-            # Get prediction
-            probs = stk_probs[i0:i0 + length]
-
-            proj_inds = r_inds_list[b_i]
-            proj_mask = r_mask_list[b_i]
-            test_probs[proj_mask] = self.test_smooth * test_probs[proj_mask] + (
-                1 - self.test_smooth) * probs
+            test_probs[ind[b_i]] = probs[i0:i0 + length]
             i0 += length
-
+        
         return test_probs
+
+
+    # def update_probs(self, inputs, results, test_probs):
+    #     # self.test_smooth = 0.95
+    #     stk_probs = torch.nn.functional.softmax(results, dim=-1).cpu().data.numpy()
+
+    #     batch = inputs['data']
+    #     # stk_labels = batch.labels.cpu().data.numpy()
+
+    #     # Get probs and labels
+    #     lengths = batch.lengths[0].cpu().numpy()
+
+    #     # f_inds = batch.frame_inds.cpu().numpy()
+    #     r_inds_list = batch.reproj_inds
+    #     r_mask_list = batch.reproj_masks
+    #     # labels_list = batch.val_labels
+
+    #     i0 = 0
+    #     for b_i, length in enumerate(lengths):
+    #         # Get prediction
+    #         probs = stk_probs[i0:i0 + length]
+
+    #         # proj_inds = r_inds_list[b_i]
+    #         proj_mask = r_mask_list[b_i]
+    #         # test_probs[proj_mask] = self.test_smooth * test_probs[proj_mask] + (1 - self.test_smooth) * probs
+
+    #         i0 += length
+
+    #     return test_probs
 
     def inference_end(self, inputs, results):
         m_softmax = torch.nn.Softmax(dim=-1)
