@@ -641,9 +641,9 @@ class KPFCNN(BaseModel):
 
         return inputs
     
-    def update_probs(self, inputs, results, test_probs):
+    def update_probs(self, inputs, results, test_probs, confidences=None):
         # Convert logits to probabilities
-        probs = torch.nn.functional.softmax(results, dim=-1).cpu().data.numpy()
+        probs = torch.nn.functional.softmax(results, dim=-1).cpu().data.numpy().astype(np.float16)
 
         # Get number of points in batches and sub indices
         lengths = inputs['data'].lengths[0].cpu().numpy()
@@ -652,7 +652,15 @@ class KPFCNN(BaseModel):
         # Loop over batch and insert prediction into whole point cloud
         i0 = 0
         for b_i, length in enumerate(lengths):
-            test_probs[ind[b_i]] = probs[i0:i0 + length]
+            prob = probs[i0:i0 + length]
+            zero_rows = (test_probs[ind[b_i]] == 0).any(axis=1).copy()
+            # weight = confidences[ind[b_i]]
+
+            # If no prediction is made yet, take new prediction
+            test_probs[ind[b_i][zero_rows]] = prob[zero_rows, :]
+            # # If there is already a prediction, take the average
+            test_probs[ind[b_i][~zero_rows]] = (test_probs[ind[b_i][~zero_rows]] + prob[~zero_rows]) / 2
+            
             i0 += length
         
         return test_probs

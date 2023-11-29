@@ -375,11 +375,15 @@ class PointTransformer(BaseModel):
         row_splits = inputs['data'].row_splits.numpy()
         point_inds = inputs['data'].point_inds.numpy()
         for i in range(len(row_splits) - 1):
+            prob = probs[row_splits[i]:row_splits[i+1], :]
             inds = point_inds[row_splits[i]:row_splits[i+1]]
-            test_probs[inds] = probs[row_splits[i]:row_splits[i+1], :]
-        
+            zero_rows = (test_probs[inds] == 0).any(axis=1).copy()
 
-        # test_probs[inds] = probs
+            # If no prediction is made yet, take new prediction
+            test_probs[inds[zero_rows]] = prob[zero_rows, :]
+            # # If there is already a prediction, take the average
+            test_probs[inds[~zero_rows]] = (test_probs[inds[~zero_rows]] + prob[~zero_rows]) / 2
+        
         return test_probs
 
         # return probs
